@@ -1,8 +1,7 @@
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from flask import Flask, request, jsonify, render_template_string
+from flask_cors import CORS
 import aiohttp
+import asyncio
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 import binascii
@@ -11,7 +10,7 @@ import uuid
 from datetime import datetime
 import json
 import os
-import uvicorn
+
 # Try to import protobuf modules with better error handling
 try:
     import MajorLoginReq_pb2
@@ -27,20 +26,9 @@ except ImportError as e:
 AES_KEY = b'Yg&tc%DEuh6%Zc^8'
 AES_IV = b'6oyZDr22E3ychjM%'
 
-# FastAPI App
-app = FastAPI(
-    title="Free Fire Token API",
-    description="High-performance async token service",
-    version="2.0.0"
-)
-
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Flask App
+app = Flask(__name__)
+CORS(app)
 
 # Global statistics
 stats = {
@@ -50,10 +38,6 @@ stats = {
     'avg_response_time': 0
 }
 
-class TokenRequest(BaseModel):
-    uid: str
-    password: str
-
 class Service:
     def __init__(self):
         self.session = None
@@ -61,7 +45,7 @@ class Service:
     async def get_session(self):
         if not self.session:
             timeout = aiohttp.ClientTimeout(total=10)
-            connector = aiohttp.TCPConnector(limit=None, verify_ssl=True)
+            connector = aiohttp.TCPConnector(limit=100, verify_ssl=False)
             self.session = aiohttp.ClientSession(timeout=timeout, connector=connector)
         return self.session
     
@@ -88,7 +72,7 @@ class Service:
 # Initialize service
 _service = Service()
 
-# HTML UI Template (same as yours - kept for compatibility)
+# HTML UI Template (same as yours)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -765,15 +749,6 @@ HTML_TEMPLATE = """
 </html>
 """
 
-
-@app.get("/", response_class=HTMLResponse)
-async def _ui():
-    return HTML_TEMPLATE
-
-@app.get("/api/stats")
-async def get_stats():
-    return stats
-
 async def get_token_async(password: str, uid: str):
     """Async token acquisition with better error handling"""
     start_time = time.time()
@@ -825,7 +800,7 @@ async def get_token_async(password: str, uid: str):
 def prepare_major_login(token_data: dict):
     """Prepare MajorLogin object with fallback values"""
     if not PROTOBUF_AVAILABLE:
-        raise HTTPException(status_code=500, detail="Protobuf modules not available")
+        raise Exception("Protobuf modules not available")
     
     try:
         major_login = MajorLoginReq_pb2.MajorLogin()
@@ -911,26 +886,30 @@ def parse_response(content):
         print(f"Response parsing error: {e}")
         return {}
 
-@app.get("/token")
-async def get_token(
-    uid: str = Query(..., description="Free Fire UID"),
-    password: str = Query(..., description="Free Fire Password")
-):
+@app.route('/')
+def ui():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/stats')
+def get_stats():
+    return jsonify(stats)
+
+@app.route('/token')
+def get_token():
     """Free Fire token generation endpoint"""
+    uid = request.args.get('uid')
+    password = request.args.get('password')
+    
+    if not uid or not password:
+        return jsonify({'error': 'UID and password are required'}), 400
     
     if not PROTOBUF_AVAILABLE:
-        raise HTTPException(
-            status_code=500, 
-            detail="Protobuf modules not available. Please check server logs."
-        )
+        return jsonify({'error': 'Protobuf modules not available. Please check server logs.'}), 500
     
-    # Get token async
-    token_data = await get_token_async(password, uid)
+    # Run async function
+    token_data = asyncio.run(get_token_async(password, uid))
     if not token_data:
-        raise HTTPException(
-            status_code=401, 
-            detail="Invalid UID or password. Please check your credentials."
-        )
+        return jsonify({'error': 'Invalid UID or password. Please check your credentials.'}), 401
     
     try:
         # Prepare MajorLogin
@@ -950,80 +929,84 @@ async def get_token(
         }
 
         # Send MajorLogin async
-        session = await _service.get_session()
-        async with session.post(
-            "https://loginbp.common.ggbluefox.com/MajorLogin",
-            data=bytes.fromhex(edata),
-            headers=headers,
-            ssl=False
-        ) as response:
-            if response.status == 200:
-                content = await response.read()
-                
-                # Parse MajorLoginRes
-                login_res = MajorLoginRes_pb2.MajorLoginRes()
-                login_res.ParseFromString(content)
+        async def send_major_login():
+            session = await _service.get_session()
+            async with session.post(
+                "https://loginbp.common.ggbluefox.com/MajorLogin",
+                data=bytes.fromhex(edata),
+                headers=headers,
+                ssl=False
+            ) as response:
+                if response.status == 200:
+                    return await response.read()
+                else:
+                    raise Exception(f"MajorLogin failed with status: {response.status}")
+        
+        content = asyncio.run(send_major_login())
+        
+        # Parse MajorLoginRes
+        login_res = MajorLoginRes_pb2.MajorLoginRes()
+        login_res.ParseFromString(content)
 
-                # Parse JWT
-                jwt_msg = jwt_generator_pb2.Garena_420()
-                jwt_msg.ParseFromString(content)
-                jwt_dict = parse_response(str(jwt_msg))
-                token = jwt_dict.get("token", "")
+        # Parse JWT
+        jwt_msg = jwt_generator_pb2.Garena_420()
+        jwt_msg.ParseFromString(content)
+        jwt_dict = parse_response(str(jwt_msg))
+        token = jwt_dict.get("token", "")
 
-                # Build response
-                response_data = {
-                    "accountId": getattr(login_res, 'account_id', ''),
-                    "tokenStatus": jwt_dict.get("status", "valid"),
-                    "token": token,
-                    "ttl": getattr(login_res, 'ttl', 86400),
-                    "serverUrl": getattr(login_res, 'server_url', ""),
-                    "expireAt": int(time.time()) + getattr(login_res, 'ttl', 86400),
-                    "generatedAt": datetime.now().isoformat(),
-                    "premium": True,
-                    "status": "success",
-                    "uid": uid
-                }
+        # Build response
+        response_data = {
+            "accountId": getattr(login_res, 'account_id', ''),
+            "tokenStatus": jwt_dict.get("status", "valid"),
+            "token": token,
+            "ttl": getattr(login_res, 'ttl', 86400),
+            "serverUrl": getattr(login_res, 'server_url', ""),
+            "expireAt": int(time.time()) + getattr(login_res, 'ttl', 86400),
+            "generatedAt": datetime.now().isoformat(),
+            "premium": True,
+            "status": "success",
+            "uid": uid
+        }
 
-                return response_data
-            else:
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"MajorLogin failed with status: {response.status}"
-                )
+        return jsonify(response_data)
 
-    except HTTPException:
-        raise
     except Exception as e:
         print(f"Token generation error: {e}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Internal server error: {str(e)}"
-        )
+        return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
-@app.get("/health")
-async def health_check():
+@app.route('/health')
+def health_check():
     """Health check endpoint"""
-    return {
+    return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "version": "2.0.0",
         "stats": stats,
         "protobuf_available": PROTOBUF_AVAILABLE,
         "environment": os.getenv("VERCEL_ENV", "development")
-    }
+    })
 
-@app.get("/test")
-async def test_endpoint():
+@app.route('/test')
+def test_endpoint():
     """Test endpoint to verify API is working"""
-    return {
+    return jsonify({
         "message": "API is working!",
         "timestamp": datetime.now().isoformat(),
         "status": "success"
-    }
+    })
 
-# Vercel handler
-handler = app
+# Startup and shutdown events
+@app.before_first_request
+async def startup():
+    await _service.get_session()
+    print("🚀 Free Fire Token Service Started Successfully!")
+    print(f"📊 Protobuf Available: {PROTOBUF_AVAILABLE}")
+    print("🔧 API Ready for Requests")
 
-if __name__ == "__main__":
+@app.teardown_appcontext
+async def shutdown(error=None):
+    await _service.close_session()
+
+if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    app.run(host='0.0.0.0', port=port, debug=False)
