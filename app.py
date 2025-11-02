@@ -61,7 +61,7 @@ class Service:
     async def get_session(self):
         if not self.session:
             timeout = aiohttp.ClientTimeout(total=10)
-            connector = aiohttp.TCPConnector(limit=100, verify_ssl=False)
+            connector = aiohttp.TCPConnector(limit=None, verify_ssl=True)
             self.session = aiohttp.ClientSession(timeout=timeout, connector=connector)
         return self.session
     
@@ -765,16 +765,6 @@ HTML_TEMPLATE = """
 </html>
 """
 
-@app.on_event("startup")
-async def startup():
-    await _service.get_session()
-    print("🚀 Free Fire Token Service Started Successfully!")
-    print(f"📊 Protobuf Available: {PROTOBUF_AVAILABLE}")
-    print("🔧 API Ready for Requests")
-
-@app.on_event("shutdown")
-async def shutdown():
-    await _service.close_session()
 
 @app.get("/", response_class=HTMLResponse)
 async def _ui():
