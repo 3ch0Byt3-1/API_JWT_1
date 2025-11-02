@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 import json
 import os
-
+import uvicorn
 # Try to import protobuf modules with better error handling
 try:
     import MajorLoginReq_pb2
@@ -1025,6 +1025,5 @@ async def test_endpoint():
 handler = app
 
 if __name__ == "__main__":
-    import uvicorn
     port = int(os.getenv("PORT", 5000))
     uvicorn.run(app, host="0.0.0.0", port=port)
