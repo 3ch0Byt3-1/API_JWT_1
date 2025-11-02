@@ -996,7 +996,7 @@ def test_endpoint():
     })
 
 # Startup and shutdown events
-@app.before_first_request
+@app.first_request
 async def startup():
     await _service.get_session()
     print("🚀 Free Fire Token Service Started Successfully!")
